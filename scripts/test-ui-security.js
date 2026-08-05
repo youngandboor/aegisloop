@@ -105,6 +105,7 @@ async function main() {
       const response = await fetch(base + route);
       const body = await response.text();
       assert(!body.includes(token), `${route} exposed the configured apiToken`);
+      assert(!JSON.stringify([...response.headers]).includes(token), `${route} exposed the configured apiToken in headers`);
       assert.strictEqual(response.headers.get('x-content-type-options'), 'nosniff');
       assert.strictEqual(response.headers.get('cross-origin-resource-policy'), 'same-origin');
       if (route === '/ui/') {
