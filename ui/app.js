@@ -1,11 +1,10 @@
 'use strict';
 
-const cfg = window.AEGISLOOP_UI_CONFIG || {};
-const token = cfg.apiToken || '';
 const clientKey = 'aegisloop-ui-client-id';
 const state = {
   conversations: [],
   selectedId: '',
+  authenticated: false,
   running: false,
   cancelRequested: false,
   currentTemplate: 'audit',
@@ -69,10 +68,7 @@ const templates = {
   },
 };
 
-function clientIdFor(conversation) {
-  if (conversation && conversation.leaderLease && conversation.leaderLease.clientId) {
-    return conversation.leaderLease.clientId;
-  }
+function clientIdFor() {
   let id = localStorage.getItem(clientKey);
   if (!id) {
     id = `ui-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
@@ -130,12 +126,12 @@ function finishProgress(ok) {
 }
 
 async function api(path, options = {}) {
+  const headers = {};
+  if (options.body) headers['Content-Type'] = 'application/json';
   const response = await fetch(path, {
     method: options.method || 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-AegisLoop-Token': token,
-    },
+    credentials: 'same-origin',
+    headers,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   const text = await response.text();
@@ -189,6 +185,13 @@ function shortWorkspace(workspace) {
   return parts.slice(-1)[0] || workspace || 'Unknown workspace';
 }
 
+function leaderAvailable(conversation) {
+  const lease = conversation && conversation.leaderLease;
+  return !lease
+    || Number(lease.expiresAt || 0) <= Date.now()
+    || lease.clientId === clientIdFor();
+}
+
 function renderStatus() {
   const c = selectedConversation();
   if (!c) {
@@ -209,7 +212,12 @@ function renderStatus() {
   $('jobText').textContent = c.lastJobId || '-';
   $('workspacePath').textContent = c.workspaceDir || 'No workspace path';
 
-  if (state.running || c.conversationMode === 'running') {
+  const canLead = leaderAvailable(c);
+  if (!canLead) {
+    setPill($('runStatus'), 'warn', 'In use elsewhere');
+  } else if (c.recoveryRequired) {
+    setPill($('runStatus'), 'bad', 'Recovery required');
+  } else if (state.running || c.conversationMode === 'running') {
     setPill($('runStatus'), 'warn', 'Codex running');
   } else if (c.hasPendingResult) {
     setPill($('runStatus'), 'warn', 'Result pending');
@@ -219,8 +227,14 @@ function renderStatus() {
     setPill($('runStatus'), 'neutral', c.conversationMode || 'Idle');
   }
 
-  $('runBtn').disabled = state.running || !token;
-  $('runLoopBtn').disabled = state.running || !token;
+  const runBlocked = !state.authenticated
+    || state.running
+    || !canLead
+    || !!c.recoveryRequired
+    || !!c.activeDispatchHash
+    || !!c.hasPendingResult;
+  $('runBtn').disabled = runBlocked;
+  $('runLoopBtn').disabled = runBlocked;
 }
 
 async function refreshStatus(quiet = false) {
@@ -228,6 +242,7 @@ async function refreshStatus(quiet = false) {
     const health = await fetch('/health').then((r) => r.json());
     setPill($('bridgeStatus'), health.ok ? 'ok' : 'bad', health.ok ? 'Bridge online' : 'Bridge offline');
     const data = await api('/api/conversations');
+    state.authenticated = true;
     const list = realConversations(data.conversations || []);
     const previous = state.selectedId;
     state.conversations = list;
@@ -242,6 +257,7 @@ async function refreshStatus(quiet = false) {
     renderStatus();
     if (!quiet) log('Status refreshed.');
   } catch (error) {
+    state.authenticated = false;
     setPill($('bridgeStatus'), 'bad', 'Bridge error');
     $('runBtn').disabled = true;
     if (!quiet) log(`Refresh failed: ${error.message}`);
@@ -297,18 +313,15 @@ function loopPrompt(basePrompt, runId, index, maxRuns, previousResult) {
   return `${basePrompt}\n\n${lines.join('\n')}`;
 }
 
-async function executeIteration(conversation, clientId, prompt, label) {
+async function sha256Hex(value) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function executeIteration(conversation, clientId, prompt, label, runId, auth) {
   appendRunResult(`\n## ${label}\n\n[GPT/UI -> Codex]\n${prompt}\n`);
-  const mode = await api('/api/mode', {
-    method: 'POST',
-    body: {
-      conversationId: conversation.conversationId,
-      clientId,
-      action: 'arm_once',
-    },
-  });
-  log(`${label}: armed ${mode.armNonce}`);
-  appendRunResult(`[Bridge]\narmed ${mode.armNonce}\ndispatching task to Codex...`);
+  appendRunResult('[Bridge]\ndispatching with the current exact turn token...');
 
   const dispatch = await api('/api/dispatch', {
     method: 'POST',
@@ -316,22 +329,26 @@ async function executeIteration(conversation, clientId, prompt, label) {
       conversationId: conversation.conversationId,
       clientId,
       prompt,
-      armNonce: mode.armNonce,
+      armId: auth.armId,
+      turnNonce: auth.turnNonce,
+      assistantMessageSig: await sha256Hex(`${runId}\0${label}`),
+      codeBlockHash: await sha256Hex(prompt),
     },
   });
   log(`${label}: dispatch ${dispatch.status}`);
   appendRunResult(`dispatch ${dispatch.status}`);
-  if (!['accepted', 'busy', 'pending_result_exists'].includes(dispatch.status)) {
-    throw new Error(`Dispatch did not start: ${dispatch.status}`);
+  if (dispatch.status !== 'accepted') {
+    const reason = dispatch.rule || dispatch.status || 'unknown';
+    throw new Error(`Dispatch did not start: ${reason}`);
   }
 
   setPill($('runStatus'), 'warn', 'Waiting result');
   appendRunResult('waiting for Codex result...');
-  const result = await waitForResult(conversation.conversationId);
+  const result = await waitForResult(conversation.conversationId, clientId);
   log(`${label}: result ${result.ok ? 'OK' : 'FAILED'} ${result.jobId || ''}`);
   appendRunResult(`\n[Codex -> GPT/UI]\n${result.ok ? 'OK' : 'FAILED'} job=${result.jobId || '-'} turn=${result.turn || '-'}\n\n${result.finalMessage || '(no final message)'}`);
 
-  await api('/api/result/ack', {
+  const acknowledged = await api('/api/result/ack', {
     method: 'POST',
     body: {
       conversationId: conversation.conversationId,
@@ -342,7 +359,13 @@ async function executeIteration(conversation, clientId, prompt, label) {
   });
   log(`${label}: acknowledged`);
   appendRunResult('\n[Bridge]\nacknowledged; this result is available as context for the next loop iteration.');
-  return result;
+  return {
+    result,
+    nextAuth: {
+      armId: acknowledged.armId || dispatch.armId || auth.armId,
+      turnNonce: acknowledged.turnNonce || dispatch.turnNonce || null,
+    },
+  };
 }
 
 async function runSequence(maxRuns) {
@@ -374,7 +397,22 @@ async function runSequence(maxRuns) {
   startProgress();
 
   try {
-    const clientId = clientIdFor(c);
+    const clientId = clientIdFor();
+    const mode = await api('/api/mode', {
+      method: 'POST',
+      body: {
+        conversationId: c.conversationId,
+        clientId,
+        action: maxRuns === 1 ? 'arm_once' : 'arm_loop',
+        maxDispatches: maxRuns,
+      },
+    });
+    let auth = {
+      armId: mode.armId,
+      turnNonce: mode.turnNonce,
+    };
+    if (!auth.armId || !auth.turnNonce) throw new Error('Bridge did not return an exact turn token.');
+    log(maxRuns === 1 ? 'Armed one run.' : `Armed a bounded ${maxRuns}-run loop.`);
     let previousResult = '';
     let completedRuns = 0;
     for (let i = 1; i <= maxRuns; i++) {
@@ -386,7 +424,16 @@ async function runSequence(maxRuns) {
         ? basePrompt
         : loopPrompt(basePrompt, runId, i, maxRuns, previousResult);
       setPill($('runStatus'), 'warn', maxRuns === 1 ? 'Running' : `Loop ${i}/${maxRuns}`);
-      const result = await executeIteration(c, clientId, prompt, maxRuns === 1 ? 'Run once' : `Loop ${i}/${maxRuns}`);
+      const iteration = await executeIteration(
+        c,
+        clientId,
+        prompt,
+        maxRuns === 1 ? 'Run once' : `Loop ${i}/${maxRuns}`,
+        runId,
+        auth,
+      );
+      const result = iteration.result;
+      auth = iteration.nextAuth;
       const finalMessage = result.finalMessage || '';
       completedRuns = i;
       previousResult = finalMessage;
@@ -418,11 +465,11 @@ async function runSequence(maxRuns) {
   }
 }
 
-async function waitForResult(conversationId) {
+async function waitForResult(conversationId, clientId) {
   const started = Date.now();
   while (Date.now() - started < 30 * 60 * 1000) {
     await new Promise((resolve) => setTimeout(resolve, 2500));
-    const response = await api(`/api/result?conversationId=${encodeURIComponent(conversationId)}`);
+    const response = await api(`/api/result?conversationId=${encodeURIComponent(conversationId)}&clientId=${encodeURIComponent(clientId)}`);
     if (response.hasResult && response.result) return response.result;
   }
   throw new Error('Timed out waiting for Codex result.');
@@ -437,7 +484,7 @@ async function pauseConversation() {
       method: 'POST',
       body: {
         conversationId: c.conversationId,
-        clientId: clientIdFor(c),
+        clientId: clientIdFor(),
         action: 'chat',
         reason: 'ui_pause',
       },
@@ -476,15 +523,8 @@ function bindEvents() {
 async function init() {
   bindEvents();
   applyTemplate('audit');
-  if (!token) {
-    setPill($('bridgeStatus'), 'bad', 'Token missing');
-    $('runBtn').disabled = true;
-    $('runLoopBtn').disabled = true;
-    log('Bridge token is missing from /ui/config.js.');
-    return;
-  }
   await refreshStatus(true);
-  log('Console ready.');
+  log(state.authenticated ? 'Console ready.' : 'Local UI session unavailable. Reopen /ui/.');
   setInterval(() => refreshStatus(true), 6000);
 }
 

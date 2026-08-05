@@ -75,7 +75,7 @@ The existing v0.3 hardening foundation includes:
 
 - startup config schema validation, so bad `config.json` values fail fast with clear errors;
 - Windows, macOS, and Linux CI checks for the core bridge, unit, and recovery fixtures;
-- optional `X-AegisLoop-Token` auth for all `/api/*` bridge calls;
+- `X-AegisLoop-Token` auth for the extension and CLI, plus a same-origin `HttpOnly` session for the local UI;
 - explicit result `ACK` / `NACK`, so Codex results are not lost if ChatGPT insertion fails;
 - clearer package, extension, and protocol version reporting;
 - Run Capsule project / branch / run / mode shown in the extension panel;
@@ -109,7 +109,7 @@ The existing v0.3 hardening foundation includes:
 - each arm creates an `armId` and per-turn `turnNonce`; turn tokens are single-use, rotate after accepted loop dispatches, and are logged only as hashes;
 - CI includes a deterministic real-loop replay fixture and a state-machine test for dispatch, ACK/NACK, pending result, leader, turn token, and protocol-fix invariants.
 
-`/health` stays public for local checks. Bridge APIs under `/api/*` are fail-closed unless you configure `apiToken`, or explicitly set `AEGISLOOP_ALLOW_NO_TOKEN=1` for a throwaway local test.
+`/health` stays public for local checks. Bridge APIs under `/api/*` are fail-closed unless you configure `apiToken`, or explicitly set `AEGISLOOP_ALLOW_NO_TOKEN=1` for a throwaway local test. The configured token remains server-side when using `/ui/`.
 
 ## Why AegisLoop
 
@@ -252,6 +252,8 @@ or:
 npm run open:ui
 ```
 
+Opening `/ui/` creates a short-lived same-origin `HttpOnly` browser session. The configured `apiToken` is never embedded in HTML or JavaScript and remains available only to the bridge and clients such as the Chrome extension that explicitly use it.
+
 Use **Inspect workspace** for a read-only first task. Use **Run once** until the workspace route is proven. Use **Run loop** only with a small finite loop count and a clear stop condition.
 
 ### 5. Load The Chrome Extension
@@ -296,9 +298,9 @@ By default, each conversation is in **Chat Mode**. In Chat Mode, AegisLoop does 
 
 AegisLoop does not trust web content to decide local authority.
 
-Every bridge endpoint under `/api/*` should be protected by `X-AegisLoop-Token`. This prevents arbitrary local web pages from reading bindings or dispatching work through the bridge. Keep the token private and do not commit it. If `apiToken` is empty, AegisLoop rejects `/api/*` by default unless `AEGISLOOP_ALLOW_NO_TOKEN=1` is set for a local throwaway test.
+Bridge endpoints under `/api/*` accept the configured `X-AegisLoop-Token` from the extension and local CLI clients. The local UI instead receives a short-lived `HttpOnly`, `SameSite=Strict` session that is valid only for same-origin loopback requests. The raw `apiToken` is never returned by `/ui/*` and is not readable by UI JavaScript. Keep the token private and do not commit it. If `apiToken` is empty, AegisLoop rejects `/api/*` by default unless `AEGISLOOP_ALLOW_NO_TOKEN=1` is set for a local throwaway test.
 
-`/api/*` also checks the request `Origin`. ChatGPT pages, the Chrome extension background page, and no-origin local CLI checks are allowed by default. Other browser origins are rejected with `origin_not_allowed`.
+`/api/*` also checks the request `Origin`. ChatGPT pages, the Chrome extension background page, the same-origin local UI, and no-origin token-authenticated local CLI checks are allowed by default. Other browser origins are rejected with `origin_not_allowed`.
 
 The `turn_nonce` / legacy `arm_nonce` value is visible in the ChatGPT page and is not a password, API token, or authentication secret. It is only a freshness marker that prevents stale `codex` blocks from old chat history being replayed. Real local authority comes from the bridge API token, Origin check, one-tab leader lease, explicit Armed Mode, exact structured `armId` + `turnNonce` body fields, pending-result lock, capsule/workspace gates, and local policy checks.
 

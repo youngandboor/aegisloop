@@ -49,6 +49,8 @@ http://127.0.0.1:17380/health
 
 The local UI should show `Bridge online`.
 
+The local UI uses a same-origin `HttpOnly` session. Its HTML and JavaScript never receive the configured `apiToken`.
+
 中文速记：
 
 ```text

@@ -159,6 +159,8 @@ or:
 npm run open:ui
 ```
 
+The page receives a short-lived same-origin `HttpOnly` session. It does not read or embed the configured `apiToken`; that token remains server-side and is still entered separately in the Chrome extension when the extension path is used.
+
 Use **Inspect workspace** for a read-only first task. Use **Run once** for controlled execution. Use **Run loop** only after one-run works and the loop has a clear stop condition.
 
 ## 6. Load The Chrome Extension
