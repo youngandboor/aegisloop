@@ -44,7 +44,11 @@ Version `v0.2.0` focuses on first-run clarity:
 
 The goal: understand it in 30 seconds, run a first local loop in about 3 minutes.
 
-## Current Focus: v0.3.20 App Server Capability Guard
+## Current Focus: v0.3.21 Local Console Preview
+
+The optional local console provides a same-origin, token-safe control surface for bounded one-shot and loop runs. It keeps server-side dispatch caps, exact turn-token checks, leader leases, pending-result recovery, and an explicit distinction between prompt guidance and enforced Codex sandbox policy. The Chrome extension route remains supported.
+
+The structured executor and Codex App Server capability guard introduced in v0.3.20 remain the execution foundation for this preview.
 
 Version `v0.3.20` keeps the structured executor, crash recovery, and one-command health diagnosis from `v0.3.19`, while making the future Codex App Server boundary easier to verify before migration.
 

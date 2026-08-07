@@ -20,6 +20,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { validateConfig } = require('./config-validation');
+const { configuredCodexSandboxPolicy } = require('./core/execution-policy');
 const { createJobJournal } = require('./core/job-journal');
 const { createExecutorAdapter, probeCodexCapabilities } = require('./executors/cli-adapter');
 
@@ -216,26 +217,6 @@ function buildCapsule(binding) {
   };
 }
 
-function configuredCodexSandboxPolicy() {
-  const args = Array.isArray(CONFIG.codex && CONFIG.codex.args) ? CONFIG.codex.args.map(String) : [];
-  if (args.includes('--dangerously-bypass-approvals-and-sandbox')) {
-    return { policy: 'danger-full-access', enforced: false, source: 'codex-cli-bypass-flag' };
-  }
-
-  const inline = args.find(arg => arg.startsWith('--sandbox='));
-  const sandboxIndex = args.indexOf('--sandbox');
-  const policy = inline
-    ? inline.slice('--sandbox='.length)
-    : sandboxIndex >= 0 && args[sandboxIndex + 1]
-      ? args[sandboxIndex + 1]
-      : 'not-specified';
-  return {
-    policy,
-    enforced: !['not-specified', 'danger-full-access'].includes(policy),
-    source: policy === 'not-specified' ? 'aegisloop-config' : 'codex-cli-sandbox-flag',
-  };
-}
-
 function effectiveExecutionPolicy(conversation) {
   const capsule = conversation.capsule;
   const capsuleEnabled = !!(capsule && capsule.enabled);
@@ -250,7 +231,7 @@ function effectiveExecutionPolicy(conversation) {
         : conversation.workspaceDir,
       allowedWriteRoot: capsuleEnabled ? capsule.allowedWriteRoot : null,
     },
-    codexSandbox: configuredCodexSandboxPolicy(),
+    codexSandbox: configuredCodexSandboxPolicy(CONFIG.codex),
   };
 }
 

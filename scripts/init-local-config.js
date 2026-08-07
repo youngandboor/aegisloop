@@ -13,7 +13,12 @@ function readJson(file) {
 }
 
 function writeJson(file, value) {
-  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
+  fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+}
+
+function restrictConfigPermissions(file) {
+  if (process.platform === 'win32') return;
+  fs.chmodSync(file, 0o600);
 }
 
 function homeRuntimeRoot() {
@@ -59,6 +64,8 @@ function main() {
   } else {
     console.log('[ok] config.json already has local initialization fields');
   }
+  restrictConfigPermissions(CONFIG_PATH);
+  if (process.platform !== 'win32') console.log('[ok] restricted config.json permissions to owner read/write');
 
   console.log('[next] start the bridge with: npm start');
   console.log(`[next] open the local UI: http://127.0.0.1:${config.port || 17380}/ui/`);

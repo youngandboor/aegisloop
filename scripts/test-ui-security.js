@@ -100,7 +100,12 @@ async function main() {
     await waitForBridge(base, child, () => output);
 
     const appSource = fs.readFileSync(path.join(repo, 'ui', 'app.js'), 'utf8');
+    const initSource = fs.readFileSync(path.join(repo, 'scripts', 'init-local-config.js'), 'utf8');
+    const openUiSource = fs.readFileSync(path.join(repo, 'scripts', 'open-ui.js'), 'utf8');
     assert(!appSource.includes('X-AegisLoop-Token'), 'UI JavaScript must not handle the configured apiToken');
+    assert.match(initSource, /chmodSync\(file, 0o600\)/, 'local config initialization must restrict token-bearing config permissions on POSIX');
+    assert.match(openUiSource, /Number\.isInteger\(port\)/, 'UI launcher must validate the configured port before spawning a browser command');
+    assert.match(appSource, /sandbox\.valid === false/, 'UI must surface invalid sandbox policy values instead of calling them enforced');
     for (const contractField of ['armId', 'turnNonce', 'assistantMessageSig', 'codeBlockHash']) {
       assert(appSource.includes(contractField), `UI must preserve ${contractField} dispatch checks`);
     }
@@ -157,6 +162,7 @@ async function main() {
     assert.strictEqual(sameOriginBody.controlPolicy.hardArmLoopMaxDispatches, 50);
     assert.strictEqual(sameOriginBody.conversations[0].executionPolicy.noEditRequestEnforced, false);
     assert.strictEqual(sameOriginBody.conversations[0].executionPolicy.codexSandbox.enforced, false);
+    assert.strictEqual(sameOriginBody.conversations[0].executionPolicy.codexSandbox.valid, true);
 
     const sameOriginHeaders = {
       Cookie: sessionCookie,

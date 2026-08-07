@@ -230,10 +230,12 @@ function renderStatus() {
   $('capsuleText').title = capsule.enabled
     ? `Prompt/cwd policy; execution cwd: ${capsule.executionCwd || '-'}`
     : 'No capsule policy is configured.';
-  $('sandboxText').textContent = sandbox.enforced
-    ? `${sandbox.policy} enforced`
-    : `${sandbox.policy || 'not-specified'}; not enforced`;
-  $('sandboxText').title = `Source: ${sandbox.source || 'unknown'}`;
+  $('sandboxText').textContent = sandbox.valid === false
+    ? `${sandbox.policy || 'invalid'}; invalid, not enforced`
+    : sandbox.enforced
+      ? `${sandbox.policy} enforced`
+      : `${sandbox.policy || 'not-specified'}; not enforced`;
+  $('sandboxText').title = `Source: ${sandbox.source || 'unknown'}; configured: ${sandbox.configured === true ? 'yes' : 'no'}`;
 
   const canLead = leaderAvailable(c);
   if (!canLead) {
