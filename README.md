@@ -254,7 +254,9 @@ npm run open:ui
 
 Opening `/ui/` creates a short-lived same-origin `HttpOnly` browser session. The configured `apiToken` is never embedded in HTML or JavaScript and remains available only to the bridge and clients such as the Chrome extension that explicitly use it.
 
-Use **Inspect workspace** for a read-only first task. Use **Run once** until the workspace route is proven. Use **Run loop** only with a small finite loop count and a clear stop condition.
+Use **Inspect workspace** for a first task that requests no edits. That request is prompt guidance, not an OS or Codex read-only sandbox; the UI shows the effective capsule and configured Codex sandbox policy beside the workspace status. Use **Run once** until the workspace route is proven. **Run loop** is bounded by `armLoopMaxDispatches` on the bridge, with an absolute ceiling of 50.
+
+If the page reloads or its UI session expires while a result is pending, reopen `/ui/` and use **Recover**. The console fetches the same pending `resultId`, displays it, and lets you acknowledge it or keep it pending.
 
 ### 5. Load The Chrome Extension
 

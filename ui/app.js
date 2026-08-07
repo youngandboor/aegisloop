@@ -6,9 +6,12 @@ const state = {
   selectedId: '',
   authenticated: false,
   running: false,
+  recovering: false,
   cancelRequested: false,
   currentTemplate: 'audit',
   lastResult: '',
+  recoveredPending: null,
+  maxLoopDispatches: 12,
   progressTimer: null,
 };
 
@@ -18,7 +21,8 @@ const templates = {
   audit: {
     title: 'Inspect workspace',
     prompt: [
-      'Run a read-only inspection of the current workspace.',
+      'Inspect the current workspace without requesting file edits.',
+      'This is a prompt-level instruction, not an OS or Codex sandbox.',
       'Do not modify, create, delete, rename, stage, commit, or push files.',
       '',
       'Summarize:',
@@ -143,7 +147,10 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     const detail = json.error || json.message || text || response.statusText;
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.status = response.status;
+    error.body = json;
+    throw error;
   }
   return json;
 }
@@ -199,10 +206,13 @@ function renderStatus() {
     $('turnText').textContent = '-';
     $('pendingText').textContent = '-';
     $('jobText').textContent = '-';
+    $('capsuleText').textContent = '-';
+    $('sandboxText').textContent = '-';
     $('workspacePath').textContent = 'No registered AegisLoop conversation.';
     setPill($('runStatus'), 'warn', 'No workspace');
     $('runBtn').disabled = true;
     $('runLoopBtn').disabled = true;
+    renderRecoveryControls(null);
     return;
   }
 
@@ -211,16 +221,29 @@ function renderStatus() {
   $('pendingText').textContent = c.hasPendingResult ? 'yes' : 'no';
   $('jobText').textContent = c.lastJobId || '-';
   $('workspacePath').textContent = c.workspaceDir || 'No workspace path';
+  const executionPolicy = c.executionPolicy || {};
+  const capsule = executionPolicy.capsule || {};
+  const sandbox = executionPolicy.codexSandbox || {};
+  $('capsuleText').textContent = capsule.enabled
+    ? `${capsule.mode || 'configured'} guidance`
+    : 'disabled';
+  $('capsuleText').title = capsule.enabled
+    ? `Prompt/cwd policy; execution cwd: ${capsule.executionCwd || '-'}`
+    : 'No capsule policy is configured.';
+  $('sandboxText').textContent = sandbox.enforced
+    ? `${sandbox.policy} enforced`
+    : `${sandbox.policy || 'not-specified'}; not enforced`;
+  $('sandboxText').title = `Source: ${sandbox.source || 'unknown'}`;
 
   const canLead = leaderAvailable(c);
   if (!canLead) {
     setPill($('runStatus'), 'warn', 'In use elsewhere');
   } else if (c.recoveryRequired) {
     setPill($('runStatus'), 'bad', 'Recovery required');
-  } else if (state.running || c.conversationMode === 'running') {
-    setPill($('runStatus'), 'warn', 'Codex running');
   } else if (c.hasPendingResult) {
     setPill($('runStatus'), 'warn', 'Result pending');
+  } else if (state.running || c.conversationMode === 'running') {
+    setPill($('runStatus'), 'warn', 'Codex running');
   } else if (c.conversationMode === 'chat') {
     setPill($('runStatus'), 'ok', 'Ready');
   } else {
@@ -235,6 +258,26 @@ function renderStatus() {
     || !!c.hasPendingResult;
   $('runBtn').disabled = runBlocked;
   $('runLoopBtn').disabled = runBlocked;
+  renderRecoveryControls(c);
+}
+
+function renderRecoveryControls(conversation) {
+  const recovered = state.recoveredPending;
+  const matchingRecovered = !!(conversation
+    && recovered
+    && recovered.conversationId === conversation.conversationId
+    && (!conversation.pendingResultId || recovered.result.resultId === conversation.pendingResultId));
+  if (recovered && !matchingRecovered) state.recoveredPending = null;
+  $('recoverBtn').hidden = matchingRecovered;
+  $('recoverBtn').disabled = !conversation
+    || !state.authenticated
+    || state.recovering
+    || !conversation.hasPendingResult
+    || !leaderAvailable(conversation);
+  $('ackRecoveredBtn').hidden = !matchingRecovered;
+  $('nackRecoveredBtn').hidden = !matchingRecovered;
+  $('ackRecoveredBtn').disabled = state.recovering;
+  $('nackRecoveredBtn').disabled = state.recovering;
 }
 
 async function refreshStatus(quiet = false) {
@@ -243,6 +286,12 @@ async function refreshStatus(quiet = false) {
     setPill($('bridgeStatus'), health.ok ? 'ok' : 'bad', health.ok ? 'Bridge online' : 'Bridge offline');
     const data = await api('/api/conversations');
     state.authenticated = true;
+    const configuredLimit = Number(data.controlPolicy && data.controlPolicy.armLoopMaxDispatches);
+    state.maxLoopDispatches = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 12;
+    $('loopCount').max = String(state.maxLoopDispatches);
+    if (Number($('loopCount').value) > state.maxLoopDispatches) {
+      $('loopCount').value = String(state.maxLoopDispatches);
+    }
     const list = realConversations(data.conversations || []);
     const previous = state.selectedId;
     state.conversations = list;
@@ -271,6 +320,13 @@ function applyTemplate(name) {
   }
   $('promptInput').value = templates[name].prompt;
   $('allowEdits').checked = name === 'patch';
+  renderEditPolicy();
+}
+
+function renderEditPolicy() {
+  $('editPolicyText').textContent = $('allowEdits').checked
+    ? 'File edits requested in prompt (effective capsule/sandbox still applies)'
+    : 'No edits requested (not sandbox-enforced)';
 }
 
 function buildPrompt(meta = '') {
@@ -278,7 +334,7 @@ function buildPrompt(meta = '') {
   const task = $('promptInput').value.trim();
   const policy = allowEdits
     ? 'This run may edit files only if necessary for the stated task. Keep edits narrow, reversible, and report every changed file. Do not commit, stage, push, delete, or rename files.'
-    : 'This run is read-only. Do not modify, create, delete, rename, stage, commit, or push files.';
+    : 'No file edits are requested for this run. This is prompt-level guidance, not an OS or Codex sandbox. Do not modify, create, delete, rename, stage, commit, or push files.';
   return `${policy}\n\n${meta ? `${meta}\n\n` : ''}${task}`;
 }
 
@@ -288,7 +344,10 @@ async function runOnce() {
 
 async function runLoop() {
   const rawCount = Number($('loopCount').value);
-  const count = Number.isFinite(rawCount) && rawCount > 0 ? Math.floor(rawCount) : 3;
+  const fallback = Math.min(3, state.maxLoopDispatches);
+  const count = Number.isFinite(rawCount) && rawCount > 0
+    ? Math.min(Math.floor(rawCount), state.maxLoopDispatches)
+    : fallback;
   $('loopCount').value = String(count);
   await runSequence(count);
 }
@@ -475,6 +534,84 @@ async function waitForResult(conversationId, clientId) {
   throw new Error('Timed out waiting for Codex result.');
 }
 
+function renderRecoveredResult(result) {
+  setRunResult([
+    '# Recovered pending result',
+    '',
+    `Result id: ${result.resultId || '-'}`,
+    `Job: ${result.jobId || '-'}`,
+    `Turn: ${result.turn || '-'}`,
+    `Status: ${result.ok ? 'OK' : 'FAILED'}`,
+    '',
+    result.finalMessage || '(no final message)',
+  ].join('\n'));
+  $('resultSubhead').textContent = 'Recovered after reload. Acknowledge it or keep it pending.';
+}
+
+async function recoverPendingResult() {
+  const conversation = selectedConversation();
+  if (!conversation || !conversation.hasPendingResult || state.recovering) return;
+  state.recovering = true;
+  renderRecoveryControls(conversation);
+  try {
+    const payload = await api(`/api/result?conversationId=${encodeURIComponent(conversation.conversationId)}&clientId=${encodeURIComponent(clientIdFor())}`);
+    if (!payload.hasResult || !payload.result) {
+      log('No pending result remains to recover.');
+      await refreshStatus(true);
+      return;
+    }
+    const result = payload.result;
+    if (conversation.pendingResultId && result.resultId !== conversation.pendingResultId) {
+      throw new Error('Pending resultId changed during recovery. Refresh before acknowledging.');
+    }
+    state.recoveredPending = { conversationId: conversation.conversationId, result };
+    renderRecoveredResult(result);
+    log(`Recovered pending result ${result.resultId}.`);
+  } catch (error) {
+    log(error.status === 401
+      ? 'UI session expired. Reopen /ui/ to recover the pending result.'
+      : `Result recovery failed: ${error.message}`);
+  } finally {
+    state.recovering = false;
+    renderStatus();
+  }
+}
+
+async function completeRecoveredResult(action) {
+  const recovered = state.recoveredPending;
+  const conversation = selectedConversation();
+  if (!recovered || !conversation || recovered.conversationId !== conversation.conversationId || state.recovering) return;
+  state.recovering = true;
+  renderRecoveryControls(conversation);
+  const result = recovered.result;
+  try {
+    const endpoint = action === 'ack' ? '/api/result/ack' : '/api/result/nack';
+    await api(endpoint, {
+      method: 'POST',
+      body: {
+        conversationId: conversation.conversationId,
+        clientId: clientIdFor(),
+        jobId: result.jobId,
+        resultId: result.resultId,
+        ...(action === 'nack' ? { reason: 'ui_recovery_deferred' } : {}),
+      },
+    });
+    log(action === 'ack'
+      ? `Acknowledged recovered result ${result.resultId}.`
+      : `Kept recovered result ${result.resultId} pending and paused the loop.`);
+    state.recoveredPending = null;
+    $('resultSubhead').textContent = action === 'ack'
+      ? 'Recovered result acknowledged.'
+      : 'Recovered result remains pending.';
+    await refreshStatus(true);
+  } catch (error) {
+    log(`Recovered result ${action.toUpperCase()} failed: ${error.message}`);
+  } finally {
+    state.recovering = false;
+    renderStatus();
+  }
+}
+
 async function pauseConversation() {
   const c = selectedConversation();
   if (!c) return;
@@ -506,11 +643,15 @@ function bindEvents() {
   $('refreshBtn').addEventListener('click', () => refreshStatus(false));
   $('conversationSelect').addEventListener('change', (event) => {
     state.selectedId = event.target.value;
+    state.recoveredPending = null;
     renderStatus();
   });
   $('runBtn').addEventListener('click', runOnce);
   $('runLoopBtn').addEventListener('click', runLoop);
   $('pauseBtn').addEventListener('click', pauseConversation);
+  $('recoverBtn').addEventListener('click', recoverPendingResult);
+  $('ackRecoveredBtn').addEventListener('click', () => completeRecoveredResult('ack'));
+  $('nackRecoveredBtn').addEventListener('click', () => completeRecoveredResult('nack'));
   $('copyBtn').addEventListener('click', copyResult);
   $('clearLogBtn').addEventListener('click', () => {
     $('activityLog').innerHTML = '';
@@ -518,6 +659,7 @@ function bindEvents() {
   for (const button of document.querySelectorAll('.template')) {
     button.addEventListener('click', () => applyTemplate(button.dataset.template));
   }
+  $('allowEdits').addEventListener('change', renderEditPolicy);
 }
 
 async function init() {

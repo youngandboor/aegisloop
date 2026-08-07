@@ -106,7 +106,7 @@ Then click **Use starter text** and **Arm one run** in the extension panel.
 
 ## First Codex Task
 
-For a first safe run, ask Codex to read only:
+For a first safe run, ask Codex not to edit files. This is a request in the prompt, not a sandbox guarantee:
 
 ````markdown
 ```codex

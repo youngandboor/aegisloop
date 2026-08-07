@@ -158,7 +158,8 @@ h2 {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 14px;
 }
 
@@ -181,6 +182,17 @@ h2 {
   margin-top: 4px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.result-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.result-actions [hidden] {
+  display: none;
 }
 
 .icon-button,
@@ -401,12 +413,12 @@ textarea:focus {
 
 .prompt-field {
   flex: 1;
-  min-height: 124px;
+  min-height: 88px;
 }
 
 .prompt-field textarea {
   height: 100%;
-  min-height: 116px;
+  min-height: 80px;
   resize: none;
 }
 

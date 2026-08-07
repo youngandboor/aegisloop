@@ -58,7 +58,11 @@ const PORT = CONFIG.port || 17380;
 const API_TOKEN = String(CONFIG.apiToken || '').trim();
 const ALLOW_NO_TOKEN = process.env.AEGISLOOP_ALLOW_NO_TOKEN === '1';
 const DEFAULT_ARM_TTL_MS = CONFIG.armTtlMs || 10 * 60 * 1000;
-const DEFAULT_ARM_LOOP_MAX_DISPATCHES = CONFIG.armLoopMaxDispatches || 12;
+const HARD_ARM_LOOP_MAX_DISPATCHES = 50;
+const DEFAULT_ARM_LOOP_MAX_DISPATCHES = Math.min(
+  CONFIG.armLoopMaxDispatches || 12,
+  HARD_ARM_LOOP_MAX_DISPATCHES,
+);
 const DEFAULT_LEADER_LEASE_MS = CONFIG.leaderLeaseMs || 15000;
 const MAX_BODY_BYTES = CONFIG.maxBodyBytes || 1024 * 1024;
 const UI_SESSION_COOKIE = 'aegisloop_ui_session';
@@ -209,6 +213,44 @@ function buildCapsule(binding) {
     allowedWriteRoot,
     stageNamespaceRequired: raw.stageNamespaceRequired !== false,
     forbiddenBranchContext: Array.isArray(raw.forbiddenBranchContext) ? raw.forbiddenBranchContext.map(String) : [],
+  };
+}
+
+function configuredCodexSandboxPolicy() {
+  const args = Array.isArray(CONFIG.codex && CONFIG.codex.args) ? CONFIG.codex.args.map(String) : [];
+  if (args.includes('--dangerously-bypass-approvals-and-sandbox')) {
+    return { policy: 'danger-full-access', enforced: false, source: 'codex-cli-bypass-flag' };
+  }
+
+  const inline = args.find(arg => arg.startsWith('--sandbox='));
+  const sandboxIndex = args.indexOf('--sandbox');
+  const policy = inline
+    ? inline.slice('--sandbox='.length)
+    : sandboxIndex >= 0 && args[sandboxIndex + 1]
+      ? args[sandboxIndex + 1]
+      : 'not-specified';
+  return {
+    policy,
+    enforced: !['not-specified', 'danger-full-access'].includes(policy),
+    source: policy === 'not-specified' ? 'aegisloop-config' : 'codex-cli-sandbox-flag',
+  };
+}
+
+function effectiveExecutionPolicy(conversation) {
+  const capsule = conversation.capsule;
+  const capsuleEnabled = !!(capsule && capsule.enabled);
+  return {
+    noEditRequestEnforced: false,
+    capsule: {
+      enabled: capsuleEnabled,
+      mode: capsuleEnabled ? capsule.mode : 'disabled',
+      enforcement: capsuleEnabled ? 'prompt-and-working-directory' : 'none',
+      executionCwd: capsuleEnabled && capsule.mode === 'readonly'
+        ? capsule.allowedWriteRoot
+        : conversation.workspaceDir,
+      allowedWriteRoot: capsuleEnabled ? capsule.allowedWriteRoot : null,
+    },
+    codexSandbox: configuredCodexSandboxPolicy(),
   };
 }
 
@@ -577,6 +619,10 @@ function isTurnNonceUsed(conversation, turnNonce) {
 }
 
 function armConversation(conversation, maxDispatches) {
+  const boundedMaxDispatches = Math.min(
+    Math.max(1, Number.isFinite(maxDispatches) ? Math.floor(maxDispatches) : 1),
+    DEFAULT_ARM_LOOP_MAX_DISPATCHES,
+  );
   conversation.conversationMode = 'armed';
   conversation.loopState = 'running';
   conversation.pauseReason = null;
@@ -584,7 +630,7 @@ function armConversation(conversation, maxDispatches) {
   rotateTurnNonce(conversation);
   conversation.usedTurnTokens = [];
   conversation.armExpiresAt = Date.now() + DEFAULT_ARM_TTL_MS;
-  conversation.armMaxDispatches = maxDispatches;
+  conversation.armMaxDispatches = boundedMaxDispatches;
   conversation.armDispatches = 0;
   conversation.updatedAt = Date.now();
   saveState();
@@ -1691,6 +1737,10 @@ const server = http.createServer(async (request, response) => {
 
     if (url.pathname === '/api/conversations' && request.method === 'GET') {
       return sendJson(response, 200, {
+        controlPolicy: {
+          armLoopMaxDispatches: DEFAULT_ARM_LOOP_MAX_DISPATCHES,
+          hardArmLoopMaxDispatches: HARD_ARM_LOOP_MAX_DISPATCHES,
+        },
         conversations: Object.values(STATE.conversations).map(c => ({
           conversationId: c.conversationId,
           codexSessionId: c.codexSessionId,
@@ -1710,6 +1760,7 @@ const server = http.createServer(async (request, response) => {
           leaderLease: c.leaderLease || null,
           blockedPayload: c.blockedPayload,
           capsule: c.capsule || null,
+          executionPolicy: effectiveExecutionPolicy(c),
           briefing: getBriefingStatus(c),
         })),
       });
@@ -1805,14 +1856,28 @@ const server = http.createServer(async (request, response) => {
       }
 
       if (body.action === 'arm_once' || body.action === 'arm_loop') {
-        const maxDispatches = body.action === 'arm_once'
-          ? 1
-          : Math.max(1, Number(body.maxDispatches || DEFAULT_ARM_LOOP_MAX_DISPATCHES));
+        let maxDispatches = 1;
+        if (body.action === 'arm_loop') {
+          const requested = body.maxDispatches === undefined
+            ? DEFAULT_ARM_LOOP_MAX_DISPATCHES
+            : Number(body.maxDispatches);
+          if (!Number.isInteger(requested)
+            || requested < 1
+            || requested > DEFAULT_ARM_LOOP_MAX_DISPATCHES) {
+            return sendJson(response, 400, {
+              error: 'invalid_max_dispatches',
+              message: `maxDispatches must be an integer between 1 and ${DEFAULT_ARM_LOOP_MAX_DISPATCHES}`,
+              maxDispatches: DEFAULT_ARM_LOOP_MAX_DISPATCHES,
+            });
+          }
+          maxDispatches = requested;
+        }
         const arm = armConversation(conversation, maxDispatches);
         return sendJson(response, 200, {
           ok: true,
           conversationMode: conversation.conversationMode,
           loopState: conversation.loopState,
+          maxDispatchesLimit: DEFAULT_ARM_LOOP_MAX_DISPATCHES,
           ...arm,
         });
       }

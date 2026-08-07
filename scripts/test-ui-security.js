@@ -43,6 +43,17 @@ async function waitForBridge(base, child, output) {
   throw new Error(`server did not start: ${output()}`);
 }
 
+async function waitForPendingResult(base, headers, conversationId, clientId) {
+  for (let index = 0; index < 40; index++) {
+    const response = await fetch(`${base}/api/result?conversationId=${encodeURIComponent(conversationId)}&clientId=${encodeURIComponent(clientId)}`, { headers });
+    assert.strictEqual(response.status, 200);
+    const payload = await response.json();
+    if (payload.hasResult && payload.result) return payload.result;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error('timed out waiting for UI pending result');
+}
+
 async function main() {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'aegisloop-ui-security-'));
   const repo = path.join(parent, 'repo');
@@ -57,6 +68,7 @@ async function main() {
     port,
     contractVersion: 'le-3.3',
     apiToken: token,
+    armLoopMaxDispatches: 2,
     runtimeRoot: path.join(parent, 'runtime'),
     bindings: [{
       conversationId,
@@ -94,6 +106,10 @@ async function main() {
     }
     assert.match(appSource, /action: maxRuns === 1 \? 'arm_once' : 'arm_loop'/);
     assert.match(appSource, /clientId=\$\{encodeURIComponent\(clientId\)\}/);
+    assert(appSource.includes('/api/result/ack'), 'UI must expose pending-result ACK recovery');
+    assert(appSource.includes('/api/result/nack'), 'UI must expose pending-result NACK recovery');
+    assert(appSource.includes('pendingResultId'), 'UI recovery must compare the pending resultId');
+    assert(appSource.includes('No edits requested (not sandbox-enforced)'), 'UI must not claim prompt guidance is an enforced sandbox');
 
     const uiFiles = fs.readdirSync(path.join(repo, 'ui'), { withFileTypes: true })
       .filter(entry => entry.isFile())
@@ -135,7 +151,12 @@ async function main() {
       },
     });
     assert.strictEqual(sameOrigin.status, 200, 'same-origin HttpOnly UI session should authorize the API');
-    assert(!await sameOrigin.text().then(text => text.includes(token)), 'authorized API response exposed the configured apiToken');
+    const sameOriginBody = await sameOrigin.json();
+    assert(!JSON.stringify(sameOriginBody).includes(token), 'authorized API response exposed the configured apiToken');
+    assert.strictEqual(sameOriginBody.controlPolicy.armLoopMaxDispatches, 2);
+    assert.strictEqual(sameOriginBody.controlPolicy.hardArmLoopMaxDispatches, 50);
+    assert.strictEqual(sameOriginBody.conversations[0].executionPolicy.noEditRequestEnforced, false);
+    assert.strictEqual(sameOriginBody.conversations[0].executionPolicy.codexSandbox.enforced, false);
 
     const sameOriginHeaders = {
       Cookie: sessionCookie,
@@ -157,6 +178,82 @@ async function main() {
     const armedBody = await armed.json();
     assert(armedBody.armId, 'UI control flow must preserve armId');
     assert(armedBody.turnNonce, 'UI control flow must preserve exact turnNonce');
+
+    const oversized = await fetch(`${base}/api/mode`, {
+      method: 'POST',
+      headers: sameOriginHeaders,
+      body: JSON.stringify({
+        conversationId,
+        clientId: 'client-ui-security',
+        action: 'arm_loop',
+        maxDispatches: 3,
+      }),
+    });
+    assert.strictEqual(oversized.status, 400, 'UI API must reject loop counts above the configured server limit');
+    assert.strictEqual((await oversized.json()).error, 'invalid_max_dispatches');
+
+    const dispatched = await fetch(`${base}/api/dispatch`, {
+      method: 'POST',
+      headers: sameOriginHeaders,
+      body: JSON.stringify({
+        conversationId,
+        clientId: 'client-ui-security',
+        prompt: 'Create a recoverable pending-result test response.',
+        armId: armedBody.armId,
+        turnNonce: armedBody.turnNonce,
+        assistantMessageSig: 'ui-security-reload-test',
+        codeBlockHash: 'ui-security-reload-test-hash',
+      }),
+    });
+    assert.strictEqual(dispatched.status, 200);
+    assert.strictEqual((await dispatched.json()).status, 'accepted');
+
+    const fetchedBeforeReload = await waitForPendingResult(
+      base,
+      sameOriginHeaders,
+      conversationId,
+      'client-ui-security',
+    );
+    assert.match(fetchedBeforeReload.resultId, /^res_[a-f0-9]{16}$/);
+
+    const reopened = await fetch(`${base}/ui/`);
+    const reopenedSetCookie = reopened.headers.get('set-cookie') || '';
+    assert.match(reopenedSetCookie, /aegisloop_ui_session=/);
+    const reopenedCookie = reopenedSetCookie.split(';', 1)[0];
+    assert.notStrictEqual(reopenedCookie, sessionCookie, 'reopening must rotate the UI session');
+    const reopenedHeaders = {
+      Cookie: reopenedCookie,
+      Origin: base,
+      'Sec-Fetch-Site': 'same-origin',
+      'Content-Type': 'application/json',
+    };
+
+    const statusAfterReload = await fetch(`${base}/api/conversations`, { headers: reopenedHeaders });
+    assert.strictEqual(statusAfterReload.status, 200);
+    const statusAfterReloadBody = await statusAfterReload.json();
+    const pendingAfterReload = statusAfterReloadBody.conversations[0];
+    assert.strictEqual(pendingAfterReload.hasPendingResult, true);
+    assert.strictEqual(pendingAfterReload.pendingResultId, fetchedBeforeReload.resultId);
+
+    const recoveredAfterReload = await fetch(`${base}/api/result?conversationId=${encodeURIComponent(conversationId)}&clientId=client-ui-security`, {
+      headers: reopenedHeaders,
+    });
+    assert.strictEqual(recoveredAfterReload.status, 200);
+    const recoveredAfterReloadBody = await recoveredAfterReload.json();
+    assert.strictEqual(recoveredAfterReloadBody.result.resultId, fetchedBeforeReload.resultId);
+
+    const recoveredAck = await fetch(`${base}/api/result/ack`, {
+      method: 'POST',
+      headers: reopenedHeaders,
+      body: JSON.stringify({
+        conversationId,
+        clientId: 'client-ui-security',
+        jobId: recoveredAfterReloadBody.result.jobId,
+        resultId: recoveredAfterReloadBody.result.resultId,
+      }),
+    });
+    assert.strictEqual(recoveredAck.status, 200, 'a fresh UI session must ACK the exact recovered resultId');
+    assert.strictEqual((await recoveredAck.json()).hasPendingResult, false);
 
     const missingOrigin = await fetch(`${base}/api/mode`, {
       method: 'POST',

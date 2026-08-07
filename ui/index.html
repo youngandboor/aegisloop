@@ -50,6 +50,14 @@
             <span class="meta-label">Last job</span>
             <strong id="jobText">-</strong>
           </div>
+          <div>
+            <span class="meta-label">Capsule</span>
+            <strong id="capsuleText">-</strong>
+          </div>
+          <div>
+            <span class="meta-label">Codex sandbox</span>
+            <strong id="sandboxText">-</strong>
+          </div>
         </div>
 
         <div class="path-box" id="workspacePath">No workspace selected</div>
@@ -61,7 +69,7 @@
         <div class="template-list" role="group" aria-label="Task templates">
           <button class="template is-active" type="button" data-template="audit">
             <span>Inspect workspace</span>
-            <small>Read-only project summary</small>
+            <small>No edits requested; not sandbox-enforced</small>
           </button>
           <button class="template" type="button" data-template="plan">
             <span>Plan next steps</span>
@@ -79,7 +87,7 @@
 
         <label class="toggle-row">
           <input id="allowEdits" type="checkbox">
-          <span>Allow file edits for this run</span>
+          <span id="editPolicyText">No edits requested (not sandbox-enforced)</span>
         </label>
 
         <label class="field prompt-field">
@@ -111,7 +119,12 @@
             <h2>Run Result</h2>
             <p id="resultSubhead">No run started from this page yet.</p>
           </div>
-          <button id="copyBtn" class="secondary compact" type="button">Copy</button>
+          <div class="result-actions">
+            <button id="recoverBtn" class="secondary compact" type="button" disabled>Recover</button>
+            <button id="ackRecoveredBtn" class="primary compact" type="button" hidden>Acknowledge</button>
+            <button id="nackRecoveredBtn" class="secondary compact" type="button" hidden>Keep pending</button>
+            <button id="copyBtn" class="secondary compact" type="button">Copy</button>
+          </div>
         </div>
 
         <div class="progress" aria-hidden="true">

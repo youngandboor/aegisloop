@@ -161,7 +161,9 @@ npm run open:ui
 
 The page receives a short-lived same-origin `HttpOnly` session. It does not read or embed the configured `apiToken`; that token remains server-side and is still entered separately in the Chrome extension when the extension path is used.
 
-Use **Inspect workspace** for a read-only first task. Use **Run once** for controlled execution. Use **Run loop** only after one-run works and the loop has a clear stop condition.
+Use **Inspect workspace** for a first task that requests no edits. This is prompt guidance, not an OS or Codex read-only sandbox; check the capsule and sandbox fields in the UI for the effective execution policy. Use **Run once** for controlled execution. **Run loop** remains bounded by the bridge's configured `armLoopMaxDispatches` value and an absolute ceiling of 50.
+
+After a reload or expired UI session, use **Recover** when the status says **Result pending**. Review the matching `resultId`, then acknowledge it or keep it pending.
 
 ## 6. Load The Chrome Extension
 
@@ -186,7 +188,7 @@ Recommended first flow:
 4. Click **Use starter text**.
 5. Click **Arm one run**.
 
-For a harmless first Codex task, ask for a read-only project summary:
+For a harmless first Codex task, request a project summary without edits:
 
 ```text
 Read the current project, summarize the state, list the safest next tasks, and do not modify files.
